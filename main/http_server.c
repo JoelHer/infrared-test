@@ -1,0 +1,485 @@
+// http_server.c
+
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
+#include <inttypes.h>
+
+#include "esp_log.h"
+#include "esp_check.h"
+#include "esp_http_server.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_tls_crypto.h"
+
+#include "protocol_examples_common.h"
+#include "protocol_examples_utils.h"
+
+#include "ota_http.h"
+#include "websocket.h"
+
+#if !CONFIG_IDF_TARGET_LINUX
+#include <esp_wifi.h>
+#include <esp_system.h>
+#include "nvs_flash.h"
+#include "esp_eth.h"
+#endif  // !CONFIG_IDF_TARGET_LINUX
+
+#define EXAMPLE_HTTP_QUERY_KEY_MAX_LEN  (64)
+
+static const char *TAG = "http_server";
+
+static httpd_handle_t s_server = NULL;   // unser globaler Server-Handle
+
+// ======================================================================
+//  BASIC AUTH (aus deinem main.c übernommen)
+// ======================================================================
+
+#if CONFIG_EXAMPLE_BASIC_AUTH
+
+typedef struct {
+    char    *username;
+    char    *password;
+} basic_auth_info_t;
+
+#define HTTPD_401      "401 UNAUTHORIZED"           /*!< HTTP Response 401 */
+
+static char *http_auth_basic(const char *username, const char *password)
+{
+    size_t out;
+    char *user_info = NULL;
+    char *digest = NULL;
+    size_t n = 0;
+    int rc = asprintf(&user_info, "%s:%s", username, password);
+    if (rc < 0) {
+        ESP_LOGE(TAG, "asprintf() returned: %d", rc);
+        return NULL;
+    }
+
+    if (!user_info) {
+        ESP_LOGE(TAG, "No enough memory for user information");
+        return NULL;
+    }
+    esp_crypto_base64_encode(NULL, 0, &n, (const unsigned char *)user_info, strlen(user_info));
+
+    digest = calloc(1, 6 + n + 1);
+    if (digest) {
+        strcpy(digest, "Basic ");
+        esp_crypto_base64_encode((unsigned char *)digest + 6, n, &out, (const unsigned char *)user_info, strlen(user_info));
+    }
+    free(user_info);
+    return digest;
+}
+
+/* An HTTP GET handler */
+static esp_err_t basic_auth_get_handler(httpd_req_t *req)
+{
+    char *buf = NULL;
+    size_t buf_len = 0;
+    basic_auth_info_t *basic_auth_info = req->user_ctx;
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Authorization") + 1;
+    if (buf_len > 1) {
+        buf = calloc(1, buf_len);
+        if (!buf) {
+            ESP_LOGE(TAG, "No enough memory for basic authorization");
+            return ESP_ERR_NO_MEM;
+        }
+
+        if (httpd_req_get_hdr_value_str(req, "Authorization", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Authorization: %s", buf);
+        } else {
+            ESP_LOGE(TAG, "No auth value received");
+        }
+
+        char *auth_credentials = http_auth_basic(basic_auth_info->username, basic_auth_info->password);
+        if (!auth_credentials) {
+            ESP_LOGE(TAG, "No enough memory for basic authorization credentials");
+            free(buf);
+            return ESP_ERR_NO_MEM;
+        }
+
+        if (strncmp(auth_credentials, buf, buf_len)) {
+            ESP_LOGE(TAG, "Not authenticated");
+            httpd_resp_set_status(req, HTTPD_401);
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Connection", "keep-alive");
+            httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Hello\"");
+            httpd_resp_send(req, NULL, 0);
+        } else {
+            ESP_LOGI(TAG, "Authenticated!");
+            char *basic_auth_resp = NULL;
+            httpd_resp_set_status(req, HTTPD_200);
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Connection", "keep-alive");
+            int rc = asprintf(&basic_auth_resp, "{\"authenticated\": true,\"user\": \"%s\"}", basic_auth_info->username);
+            if (rc < 0) {
+                ESP_LOGE(TAG, "asprintf() returned: %d", rc);
+                free(auth_credentials);
+                return ESP_FAIL;
+            }
+            if (!basic_auth_resp) {
+                ESP_LOGE(TAG, "No enough memory for basic authorization response");
+                free(auth_credentials);
+                free(buf);
+                return ESP_ERR_NO_MEM;
+            }
+            httpd_resp_send(req, basic_auth_resp, strlen(basic_auth_resp));
+            free(basic_auth_resp);
+        }
+        free(auth_credentials);
+        free(buf);
+    } else {
+        ESP_LOGE(TAG, "No auth header received");
+        httpd_resp_set_status(req, HTTPD_401);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Connection", "keep-alive");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Hello\"");
+        httpd_resp_send(req, NULL, 0);
+    }
+
+    return ESP_OK;
+}
+
+static httpd_uri_t basic_auth = {
+    .uri       = "/basic_auth",
+    .method    = HTTP_GET,
+    .handler   = basic_auth_get_handler,
+};
+
+static void httpd_register_basic_auth(httpd_handle_t server)
+{
+    basic_auth_info_t *basic_auth_info = calloc(1, sizeof(basic_auth_info_t));
+    if (basic_auth_info) {
+        basic_auth_info->username = CONFIG_EXAMPLE_BASIC_AUTH_USERNAME;
+        basic_auth_info->password = CONFIG_EXAMPLE_BASIC_AUTH_PASSWORD;
+
+        basic_auth.user_ctx = basic_auth_info;
+        httpd_register_uri_handler(server, &basic_auth);
+    }
+}
+#endif // CONFIG_EXAMPLE_BASIC_AUTH
+
+// ======================================================================
+//  HELLO / ECHO / ANY / CTRL Handler (direkt aus deinem main.c)
+// ======================================================================
+
+static esp_err_t hello_get_handler(httpd_req_t *req)
+{
+    char*  buf;
+    size_t buf_len;
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        buf = malloc(buf_len);
+        ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "buffer alloc failed");
+        if (httpd_req_get_hdr_value_str(req, "Host", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Host: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-2") + 1;
+    if (buf_len > 1) {
+        buf = malloc(buf_len);
+        ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "buffer alloc failed");
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-2", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-2: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_hdr_value_len(req, "Test-Header-1") + 1;
+    if (buf_len > 1) {
+        buf = malloc(buf_len);
+        ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "buffer alloc failed");
+        if (httpd_req_get_hdr_value_str(req, "Test-Header-1", buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found header => Test-Header-1: %s", buf);
+        }
+        free(buf);
+    }
+
+    buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        buf = malloc(buf_len);
+        ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "buffer alloc failed");
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            ESP_LOGI(TAG, "Found URL query => %s", buf);
+            char param[EXAMPLE_HTTP_QUERY_KEY_MAX_LEN], dec_param[EXAMPLE_HTTP_QUERY_KEY_MAX_LEN] = {0};
+            if (httpd_query_key_value(buf, "query1", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query1=%s", param);
+                example_uri_decode(dec_param, param, strnlen(param, EXAMPLE_HTTP_QUERY_KEY_MAX_LEN));
+                ESP_LOGI(TAG, "Decoded query parameter => %s", dec_param);
+            }
+            if (httpd_query_key_value(buf, "query3", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query3=%s", param);
+                example_uri_decode(dec_param, param, strnlen(param, EXAMPLE_HTTP_QUERY_KEY_MAX_LEN));
+                ESP_LOGI(TAG, "Decoded query parameter => %s", dec_param);
+            }
+            if (httpd_query_key_value(buf, "query2", param, sizeof(param)) == ESP_OK) {
+                ESP_LOGI(TAG, "Found URL query parameter => query2=%s", param);
+                example_uri_decode(dec_param, param, strnlen(param, EXAMPLE_HTTP_QUERY_KEY_MAX_LEN));
+                ESP_LOGI(TAG, "Decoded query parameter => %s", dec_param);
+            }
+        }
+        free(buf);
+    }
+
+    httpd_resp_set_hdr(req, "Custom-Header-1", "Custom-Value-1");
+    httpd_resp_set_hdr(req, "Custom-Header-2", "Custom-Value-2");
+
+    const char* resp_str = (const char*) req->user_ctx;
+    httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
+
+    if (httpd_req_get_hdr_value_len(req, "Host") == 0) {
+        ESP_LOGI(TAG, "Request headers lost");
+    }
+    return ESP_OK;
+}
+
+static const httpd_uri_t hello = {
+    .uri       = "/hello",
+    .method    = HTTP_GET,
+    .handler   = hello_get_handler,
+    .user_ctx  = "Hello World! This is the updated OTA version! :)"
+};
+
+static esp_err_t echo_post_handler(httpd_req_t *req)
+{
+    char buf[100];
+    int ret, remaining = req->content_len;
+
+    while (remaining > 0) {
+        if ((ret = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)))) <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            return ESP_FAIL;
+        }
+
+        httpd_resp_send_chunk(req, buf, ret);
+        remaining -= ret;
+
+        ESP_LOGI(TAG, "=========== RECEIVED DATA ==========");
+        ESP_LOGI(TAG, "%.*s", ret, buf);
+        ESP_LOGI(TAG, "====================================");
+    }
+
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static const httpd_uri_t echo = {
+    .uri       = "/echo",
+    .method    = HTTP_POST,
+    .handler   = echo_post_handler,
+    .user_ctx  = NULL
+};
+
+static esp_err_t any_handler(httpd_req_t *req)
+{
+    const char* resp_str = (const char*) req->user_ctx;
+    httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static const httpd_uri_t any = {
+    .uri       = "/any",
+    .method    = HTTP_ANY,
+    .handler   = any_handler,
+    .user_ctx  = "Hello World!"
+};
+
+esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    if (strcmp("/hello", req->uri) == 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "/hello URI is not available");
+        return ESP_OK;
+    } else if (strcmp("/echo", req->uri) == 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "/echo URI is not available");
+        return ESP_FAIL;
+    }
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Some 404 error message");
+    return ESP_FAIL;
+}
+
+static esp_err_t ctrl_put_handler(httpd_req_t *req)
+{
+    char buf;
+    int ret;
+
+    if ((ret = httpd_req_recv(req, &buf, 1)) <= 0) {
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            httpd_resp_send_408(req);
+        }
+        return ESP_FAIL;
+    }
+
+    if (buf == '0') {
+        ESP_LOGI(TAG, "Unregistering /hello and /echo URIs");
+        httpd_unregister_uri(req->handle, "/hello");
+        httpd_unregister_uri(req->handle, "/echo");
+        httpd_register_err_handler(req->handle, HTTPD_404_NOT_FOUND, http_404_error_handler);
+    } else {
+        ESP_LOGI(TAG, "Registering /hello and /echo URIs");
+        httpd_register_uri_handler(req->handle, &hello);
+        httpd_register_uri_handler(req->handle, &echo);
+        httpd_register_err_handler(req->handle, HTTPD_404_NOT_FOUND, NULL);
+    }
+
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static const httpd_uri_t ctrl = {
+    .uri       = "/ctrl",
+    .method    = HTTP_PUT,
+    .handler   = ctrl_put_handler,
+    .user_ctx  = NULL
+};
+
+// ======================================================================
+//  SSE Handler (wie gehabt)
+// ======================================================================
+
+#if CONFIG_EXAMPLE_ENABLE_SSE_HANDLER
+static esp_err_t sse_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
+
+    char sse_data[64];
+    while (1) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        int64_t time_since_boot = tv.tv_sec;
+        esp_err_t err;
+        int len = snprintf(sse_data, sizeof(sse_data),
+                           "data: Time since boot: %" PRIi64 " seconds\n\n",
+                           time_since_boot);
+        if ((err = httpd_resp_send_chunk(req, sse_data, len)) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send sse data (returned %02X)", err);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static const httpd_uri_t sse = {
+    .uri       = "/sse",
+    .method    = HTTP_GET,
+    .handler   = sse_handler,
+    .user_ctx  = NULL
+};
+#endif // CONFIG_EXAMPLE_ENABLE_SSE_HANDLER
+
+// ======================================================================
+//  Webserver Start/Stop + Eventhandler
+// ======================================================================
+
+static httpd_handle_t start_webserver_internal(void)
+{
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+#if CONFIG_IDF_TARGET_LINUX
+    config.server_port = 8001;
+#endif
+    config.lru_purge_enable = true;
+
+    ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+    if (httpd_start(&server, &config) == ESP_OK) {
+        ESP_LOGI(TAG, "Registering URI handlers");
+        httpd_register_uri_handler(server, &hello);
+        httpd_register_uri_handler(server, &echo);
+        httpd_register_uri_handler(server, &ctrl);
+        httpd_register_uri_handler(server, &any);
+        websocket_register_handlers(server);
+#if CONFIG_EXAMPLE_ENABLE_SSE_HANDLER
+        httpd_register_uri_handler(server, &sse);
+#endif
+#if CONFIG_EXAMPLE_BASIC_AUTH
+        httpd_register_basic_auth(server);
+#endif
+
+        // OTA-Handler registrieren
+        ota_http_register_handlers(server);
+
+        return server;
+    }
+
+    ESP_LOGI(TAG, "Error starting server!");
+    return NULL;
+}
+
+esp_err_t http_server_start(void)
+{
+    if (s_server == NULL) {
+        s_server = start_webserver_internal();
+        if (s_server == NULL) {
+            return ESP_FAIL;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t http_server_stop(void)
+{
+    if (s_server) {
+        ESP_LOGI(TAG, "Stopping webserver");
+        httpd_handle_t tmp = s_server;
+        s_server = NULL;
+        return httpd_stop(tmp);
+    }
+    return ESP_OK;
+}
+
+#if !CONFIG_IDF_TARGET_LINUX
+static void disconnect_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
+{
+    (void)arg;
+    (void)event_base;
+    (void)event_id;
+    (void)event_data;
+
+    http_server_stop();
+}
+
+static void connect_handler(void* arg, esp_event_base_t event_base,
+                            int32_t event_id, void* event_data)
+{
+    (void)arg;
+    (void)event_base;
+    (void)event_id;
+    (void)event_data;
+
+    http_server_start();
+}
+#endif // !CONFIG_IDF_TARGET_LINUX
+
+esp_err_t http_server_register_event_handlers(void)
+{
+#if !CONFIG_IDF_TARGET_LINUX
+#ifdef CONFIG_EXAMPLE_CONNECT_WIFI
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               &connect_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                                               &disconnect_handler, NULL));
+#endif // CONFIG_EXAMPLE_CONNECT_WIFI
+#ifdef CONFIG_EXAMPLE_CONNECT_ETHERNET
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                               &connect_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_DISCONNECTED,
+                                               &disconnect_handler, NULL));
+#endif // CONFIG_EXAMPLE_CONNECT_ETHERNET
+#endif // !CONFIG_IDF_TARGET_LINUX
+
+    return ESP_OK;
+}
