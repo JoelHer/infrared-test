@@ -122,6 +122,9 @@
         border-radius: 8px;
         padding: 24px;
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
       }
 
       .console-label {
@@ -130,6 +133,139 @@
         margin-bottom: 8px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
+      }
+
+      .control-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        align-items: start;
+      }
+
+      .card {
+        background: linear-gradient(145deg, #1c2230, #121722);
+        border: 1px solid #1f2937;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+      }
+
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        gap: 12px;
+      }
+
+      .pill {
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        border: 1px solid #1f2937;
+        background: rgba(59, 130, 246, 0.1);
+        color: #60a5fa;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        background: rgba(16, 185, 129, 0.12);
+        color: #34d399;
+        border-color: rgba(16, 185, 129, 0.4);
+      }
+
+      .pill.warn {
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+
+      .field {
+        margin-bottom: 14px;
+      }
+
+      .field label {
+        display: block;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #e5e7eb;
+        margin-bottom: 6px;
+      }
+
+      .input-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .input-row input[type="number"] {
+        width: 140px;
+        background: #0d1117;
+        border: 1px solid #1f2937;
+        color: #e5e7eb;
+        padding: 10px 12px;
+        border-radius: 6px;
+        outline: none;
+        transition: border 0.2s;
+      }
+
+      .input-row input[type="number"]:focus {
+        border-color: #3b82f6;
+      }
+
+      .input-hint {
+        font-size: 0.75rem;
+        color: #6b7280;
+      }
+
+      .range-labels {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.75rem;
+        color: #6b7280;
+        margin-top: 4px;
+      }
+
+      .range {
+        width: 100%;
+        accent-color: #3b82f6;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+        flex-wrap: wrap;
+      }
+
+      .actions .btn-primary {
+        width: auto;
+      }
+
+      .btn-secondary {
+        padding: 12px 16px;
+        font: inherit;
+        font-size: 0.85rem;
+        font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
+        background: #0d1117;
+        color: #9ca3af;
+        border: 1px solid #1f2937;
+        transition: all 0.2s;
+      }
+
+      .btn-secondary:hover {
+        border-color: #3b82f6;
+        color: #e5e7eb;
+        transform: translateY(-1px);
+      }
+
+      .pwm-meta {
+        margin-top: 8px;
+        font-size: 0.78rem;
+        color: #6b7280;
       }
 
       pre {
@@ -340,10 +476,51 @@
         </div>
 
         <div class="main-panel">
-          <div class="console-label">System Console</div>
-          <pre id="console"><span class="dot"></span>System initialized
+          <div class="control-grid">
+            <div class="card pwm-card">
+              <div class="card-header">
+                <div>
+                  <div class="console-label">PWM LED Control</div>
+                  <div class="pwm-meta">GPIO2 | LEDC timer 0</div>
+                </div>
+                <div class="pill warn" id="ws-pill">WS Disconnected</div>
+              </div>
+
+              <div class="field">
+                <label for="frequency">Frequency (Hz)</label>
+                <div class="input-row">
+                  <input type="number" id="frequency" min="10" max="20000" value="1000" />
+                  <span class="input-hint">10 - 20000 Hz</span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="duty">Duty Cycle <span id="duty-value">50%</span></label>
+                <input type="range" id="duty" class="range" min="0" max="100" value="50" />
+                <div class="range-labels">
+                  <span>0%</span>
+                  <span>50%</span>
+                  <span>100%</span>
+                </div>
+              </div>
+
+              <div class="actions">
+                <button class="btn-primary" onclick="sendPwm()">Push PWM Update</button>
+                <button class="btn-secondary" onclick="requestPwmState()">Refresh state</button>
+              </div>
+
+              <div class="pwm-meta">
+                Commands stream over WebSockets. Tune the LED on GPIO2 with live feedback.
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="console-label">System Console</div>
+              <pre id="console"><span class="dot"></span>System initialized
 <span class="dot"></span>All modules loaded
 <span class="dot"></span>Ready for operation</pre>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -371,18 +548,121 @@
 
         <p>Once connected, the recovery interface will load automatically.</p>
 
-        <button class="btn-primary" onclick="proceed()">
+        <button id="recovery-btn" class="btn-primary" onclick="proceed()">
           Understood and Continue
         </button>
       </div>
     </div>
 
-    <script>
+        <script>
+      let ws;
+      let reconnectTimer;
+
+      const frequencyInput = document.getElementById("frequency");
+      const dutyInput = document.getElementById("duty");
+      const dutyValue = document.getElementById("duty-value");
+      const wsPill = document.getElementById("ws-pill");
+
       function log(msg) {
         const c = document.getElementById("console");
         c.innerHTML += '\n<span class="dot"></span>' + msg;
         c.scrollTop = c.scrollHeight;
       }
+
+      function setWsStatus(text, tone) {
+        if (!wsPill) return;
+        wsPill.textContent = text;
+        wsPill.className = "pill " + (tone || "");
+      }
+
+      function updateDutyLabel(value) {
+        if (dutyValue) {
+          dutyValue.textContent = value + "%";
+        }
+      }
+
+      function handleWsMessage(raw) {
+        try {
+          const data = JSON.parse(raw);
+          if (data.type === "pwm_state") {
+            if (typeof data.frequency === "number" && frequencyInput) {
+              frequencyInput.value = data.frequency;
+            }
+            if (typeof data.duty === "number" && dutyInput) {
+              dutyInput.value = data.duty;
+              updateDutyLabel(data.duty);
+            }
+            if (data.status === "ok") {
+              log(`PWM set to ${data.frequency} Hz @ ${data.duty}%`);
+            } else {
+              log(`PWM error: ${data.message || "update failed"}`);
+            }
+            return;
+          }
+        } catch (e) {
+          log("WS parse error");
+          return;
+        }
+        log(`WS message: ${raw}`);
+      }
+
+      function requestPwmState() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "pwm_get" }));
+          log("Requested current PWM state");
+        } else {
+          log("WS not connected, cannot refresh");
+        }
+      }
+
+      function sendPwm() {
+        if (!(ws && ws.readyState === WebSocket.OPEN)) {
+          log("WebSocket not connected");
+          return;
+        }
+
+        const frequency = parseInt(frequencyInput?.value || "0", 10) || 0;
+        const duty = parseInt(dutyInput?.value || "0", 10) || 0;
+
+        ws.send(JSON.stringify({ type: "pwm_update", frequency, duty }));
+        log(`Pushing PWM ${frequency} Hz @ ${duty}%`);
+      }
+
+      function connectWs() {
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+        setWsStatus("Connecting...", "");
+
+        ws.onopen = () => {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          setWsStatus("WS Connected", "ok");
+          log("WebSocket connected");
+          requestPwmState();
+        };
+
+        ws.onclose = () => {
+          setWsStatus("WS Disconnected", "warn");
+          log("WebSocket closed, retrying...");
+          if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              connectWs();
+            }, 1500);
+          }
+        };
+
+        ws.onerror = () => log("WebSocket error");
+        ws.onmessage = (event) => handleWsMessage(event.data);
+      }
+
+      if (dutyInput) {
+        updateDutyLabel(dutyInput.value);
+        dutyInput.addEventListener("input", (e) => updateDutyLabel(e.target.value));
+      }
+      connectWs();
 
       function showRecovery() {
         document.getElementById("overlay").classList.add("active");
@@ -393,7 +673,7 @@
       }
 
       async function proceed() {
-        const btn = document.querySelector(".btn-primary");
+        const btn = document.getElementById("recovery-btn");
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span>Connecting...';
 
@@ -428,3 +708,4 @@
     </script>
   </body>
 </html>
+

@@ -15,6 +15,7 @@ idf_component_register(
         "ota_http.c"
         "vigilant.c"
         "status_led.c"
+        "pwm_led.c"
     INCLUDE_DIRS
         "."
     EMBED_FILES 
@@ -24,4 +25,6 @@ idf_component_register(
         app_update
         esp_partition
         led_strip
+        esp_driver_ledc
+        json
 )

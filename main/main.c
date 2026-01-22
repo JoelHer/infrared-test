@@ -1,7 +1,9 @@
 #include <unistd.h>
 #include "esp_log.h"
+#include "esp_err.h"
 #include "vigilant.h"
 #include "status_led.h"
+#include "pwm_led.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -14,6 +16,22 @@ void app_main(void)
         .network_mode = NW_MODE_APSTA
     };
     ESP_ERROR_CHECK(vigilant_init(VgConfig));
+
+    pwm_led_config_t pwm_cfg = {
+        .gpio_num = 2,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer = LEDC_TIMER_0,
+        .channel = LEDC_CHANNEL_0,
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .default_frequency_hz = CONFIG_VE_PWM_DEFAULT_FREQ,
+        .default_duty_percent = CONFIG_VE_PWM_DEFAULT_DUTY,
+    };
+    esp_err_t pwm_err = pwm_led_init(&pwm_cfg);
+    if (pwm_err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "PWM LED disabled via config");
+    } else {
+        ESP_ERROR_CHECK(pwm_err);
+    }
 
     while (1) {
         ESP_ERROR_CHECK(status_led_set_rgb(100, 100, 100));

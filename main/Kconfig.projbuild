@@ -48,5 +48,37 @@ menu "Vigilant Engine Configuration"
         default 8
         help
             The GPIO pin number for the status LED.
+
+    config VE_ENABLE_PWM_LED
+        bool "Enable PWM LED control"
+        default y
+        help
+            Enable this option to drive a PWM LED from Vigilant Engine.
+            When enabled, a PWM channel will be initialized and can be
+            controlled via the web dashboard using WebSockets.
+
+    config VE_PWM_GPIO
+        int "PWM LED GPIO pin"
+        depends on VE_ENABLE_PWM_LED
+        default 2
+        help
+            The GPIO pin number for the PWM LED output.
+
+    config VE_PWM_DEFAULT_FREQ
+        int "PWM default frequency (Hz)"
+        depends on VE_ENABLE_PWM_LED
+        default 1000
+        help
+            The frequency in Hertz applied on boot before the dashboard
+            overrides it. Values outside the hardware limits will be clamped.
+
+    config VE_PWM_DEFAULT_DUTY
+        int "PWM default duty cycle (%)"
+        depends on VE_ENABLE_PWM_LED
+        range 0 100
+        default 50
+        help
+            The duty cycle percentage applied on boot before the dashboard
+            overrides it.
         
 endmenu
