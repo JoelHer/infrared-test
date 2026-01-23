@@ -13,7 +13,7 @@ void app_main(void)
 {
     VigilantConfig VgConfig = {
         .unique_component_name = "Vigliant ESP Test",
-        .network_mode = NW_MODE_APSTA
+        .network_mode = NW_MODE_AP
     };
     ESP_ERROR_CHECK(vigilant_init(VgConfig));
 
@@ -23,8 +23,8 @@ void app_main(void)
         .timer = LEDC_TIMER_0,
         .channel = LEDC_CHANNEL_0,
         .duty_resolution = LEDC_TIMER_10_BIT,
-        .default_frequency_hz = CONFIG_VE_PWM_DEFAULT_FREQ,
-        .default_duty_percent = CONFIG_VE_PWM_DEFAULT_DUTY,
+        .default_frequency_hz = 0,
+        .default_duty_percent = 0,
     };
     esp_err_t pwm_err = pwm_led_init(&pwm_cfg);
     if (pwm_err == ESP_ERR_NOT_SUPPORTED) {
